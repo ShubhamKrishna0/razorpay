@@ -1,0 +1,125 @@
+# ---------------------------------------------------------------------------
+# Render blueprint — one backend web service, one static frontend, one Postgres.
+#
+# Deploy:  push this repo to GitHub, then Render → New → Blueprint → pick the repo.
+#
+# Two values must be set by hand after the first deploy, because each service
+# needs the other's URL and neither exists until it is created:
+#   1. backend  CORS_ORIGINS      -> the frontend's URL
+#   2. frontend VITE_API_BASE_URL -> the backend's URL
+# Both are marked `sync: false` below so Render prompts for them.
+# ---------------------------------------------------------------------------
+
+databases:
+  - name: finance-controller-db
+    plan: free
+    databaseName: finance_controller
+    user: finance_controller
+
+services:
+  # -------------------------------------------------------------------------
+  # Backend — FastAPI + DuckDB + Polars
+  # -------------------------------------------------------------------------
+  - type: web
+    name: finance-controller-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: bash ../scripts/render-build-backend.sh
+    startCommand: bash ../scripts/render-start-backend.sh
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+
+      # Postgres is provisioned above; Render injects the connection string.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: finance-controller-db
+          property: connectionString
+
+      # Parquet artifacts. On the free plan this is ephemeral — a redeploy wipes
+      # past runs, which is fine for a demo since datasets regenerate in seconds.
+      # For durable history, upgrade the plan and attach a disk mounted here:
+      #   disk:
+      #     name: recon-data
+      #     mountPath: /var/data
+      #     sizeGB: 10
+      - key: DATA_DIR
+        value: /tmp/recon-data
+
+      # Set this to the frontend's URL after the first deploy.
+      - key: CORS_ORIGINS
+        sync: false
+
+      # Set ONE provider key. Without either, the engine still runs end to end —
+      # every exception simply routes to the human queue instead of the AI lane.
+      #   AI_PROVIDER=auto picks whichever key is present (Anthropic first).
+      - key: AI_PROVIDER
+        value: auto
+      - key: AI_ENABLED
+        value: "true"
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      # Required only for identity-linked Anthropic keys (Console -> Workspaces).
+      - key: ANTHROPIC_WORKSPACE_ID
+        sync: false
+      - key: AI_MODEL
+        value: claude-opus-5
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-pro
+      - key: AI_EFFORT
+        value: high
+      - key: AI_BATCH_SIZE
+        value: "12"
+      - key: AI_MAX_CONCURRENCY
+        value: "4"
+      - key: AI_MAX_EXCEPTIONS_PER_RUN
+        value: "500"
+      # A model that stops responding must fail the batch, not hang the run.
+      - key: AI_TIMEOUT_SECONDS
+        value: "90"
+
+      # Engine tuning. These are the thresholds the /api/config endpoint exposes.
+      - key: DUCKDB_THREADS
+        value: "2"
+      - key: DUCKDB_MEMORY_LIMIT
+        value: 400MB
+      - key: AUTO_RESOLVE_THRESHOLD
+        value: "0.95"
+      - key: AI_INVESTIGATE_THRESHOLD
+        value: "0.80"
+      - key: BENCH_SIZES
+        value: 1000,10000,100000
+
+  # -------------------------------------------------------------------------
+  # Frontend — Vite static build
+  # -------------------------------------------------------------------------
+  - type: web
+    name: finance-controller-web
+    runtime: static
+    plan: free
+    rootDir: frontend
+    buildCommand: bash ../scripts/render-build-frontend.sh
+    staticPublishPath: dist
+    autoDeploy: true
+    envVars:
+      # Set to the backend's URL, e.g. https://finance-controller-api.onrender.com
+      - key: VITE_API_BASE_URL
+        sync: false
+    routes:
+      # Client-side routing: every unknown path serves the SPA shell.
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /assets/*
+        name: Cache-Control
+        value: public, max-age=31536000, immutable

@@ -105,7 +105,8 @@ services:
   - type: web
     name: finance-controller-web
     runtime: static
-    plan: free
+    # No `plan` here: static sites are free by definition, and Render's
+    # blueprint validator rejects a plan field on runtime: static.
     rootDir: frontend
     buildCommand: bash ../scripts/render-build-frontend.sh
     staticPublishPath: dist
